@@ -109,7 +109,8 @@ static void update_proc(Layer *layer, GContext *ctx) {
   // Adjust for minutes through the hour
   int32_t hour_deg = get_angle_for_hour(s_last_time.hours, s_last_time.minutes);
   int32_t minute_deg = get_angle_for_minute(s_last_time.minutes);
-
+  
+  // draw the watch hands that will be used as texture
   GPoint minute_hand_outer = gpoint_from_polar(bounds_mo, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(minute_deg));
   GPoint hour_hand_outer = gpoint_from_polar(bounds_ho, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(hour_deg));
   graphics_context_set_stroke_color(ctx, GColorWindsorTan);
@@ -121,124 +122,142 @@ static void update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_circle(ctx, s_center, whwidth/4);
   
-  GSize texturesize = GSize(127, 127);  
-  
-  GBitmap *texture = gbitmap_create_blank(texturesize, GBitmapFormat8Bit);
-  uint8_t (*texture_matrix)[texturesize.w] = (uint8_t (*)[texturesize.w]) gbitmap_get_data(texture);
-  GBitmap *fb = graphics_capture_frame_buffer_format(ctx, GBitmapFormat8Bit);
-  uint8_t (*fb_matrix)[144] = (uint8_t (*)[144]) gbitmap_get_data(fb);
-
-  for(int y = 0; y < texturesize.h; y++) {
-    for(int x = 0; x < texturesize.w; x++) {
-      texture_matrix[y][x] = fb_matrix[y+20][x+8];
-    }
-  }
-  
+  // define mapping metadata
+  GPoint donutoffset = GPoint(9, 42);
+  GPoint shadowoffset = GPoint(7, 58);
+  GPoint specularoffset = GPoint(40, 50);
   
   GSize donutsurfacemapsize = GSize(125, 80);
   GSize donutshadowsize = GSize(122, 71);
   GSize donutspecularsize = GSize(74, 47);
   
+  // capture frame buffer
+  GBitmap *fb = graphics_capture_frame_buffer(ctx);
+  
+  // set up texture buffer
+  GRect texturebounds = GRect(s_center.x-64, s_center.y-64, 127, 127);
+  GSize texturesize = GSize(texturebounds.size.w, texturebounds.size.h);
+  GBitmap *texture = gbitmap_create_blank(texturesize, GBitmapFormat8Bit);
+  uint8_t (*texture_matrix)[texturesize.w] = (uint8_t (*)[texturesize.w]) gbitmap_get_data(texture);
+  
+  // capture texture and fill frame buffer with new background color
   for(int y = 0; y < bounds.size.h; y++) {
-    for(int x = 0; x < bounds.size.w; x++) {
-      fb_matrix[y][x] = bgcolor.argb;
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
+    for(int x = info.min_x; x < info.max_x; x++) {
+      if (x >= texturebounds.origin.x && y >= texturebounds.origin.y && x < texturebounds.origin.x+texturebounds.size.w && y < texturebounds.origin.y+texturebounds.size.h) {
+        texture_matrix[y-texturebounds.origin.y][x-texturebounds.origin.x] = info.data[x];
+      }
+      memset(&info.data[x], bgcolor.argb, 1);
     }
   }
   
+  // render texture mapped around shape by looking up pixels in the lookup table
   for(int y = 0; y < donutsurfacemapsize.h; y++) {
-    for(int x = 0; x < donutsurfacemapsize.w; x++) {
-      uint16_t surfindex = x+(y*donutsurfacemapsize.w);
-      uint8_t xpos = un_heptet_x(surfindex);
-      uint8_t ypos = un_heptet_y(surfindex);
-      if (xpos > 0 && ypos < 127) {
-        fb_matrix[y+42][x+9] = texture_matrix[ypos][xpos];
-      }
-    }
-  }
-  
-  for(int y = 0; y < donutspecularsize.h; y++) {
-    for(int x = 0; x < donutspecularsize.w; x++) {
-      uint16_t spec_index = x+(y*donutspecularsize.w);
-      uint8_t spec_octet = donutspecular[spec_index/8];
-      bool spec_white = 0;
-      if ((x+y) % 2 == 0) {
-        spec_white = 0;
-      } else {
-        switch (spec_index % 8) {
-          case 0:
-            spec_white = 0b10000000 & spec_octet;
-            break;
-          case 1:
-            spec_white = 0b01000000 & spec_octet;
-            break;
-          case 2:
-            spec_white = 0b00100000 & spec_octet;
-            break;
-          case 3:
-            spec_white = 0b00010000 & spec_octet;
-            break;
-          case 4:
-            spec_white = 0b00001000 & spec_octet;
-            break;
-          case 5:
-            spec_white = 0b00000100 & spec_octet;
-            break;
-          case 6:
-            spec_white = 0b00000010 & spec_octet;
-            break;
-          case 7:
-            spec_white = 0b00000001 & spec_octet;
-            break;
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y+donutoffset.y);
+    for(int x = donutoffset.x; x < donutsurfacemapsize.w+donutoffset.x; x++) {
+      if (x+donutoffset.x < info.max_x && x+donutoffset.x >= info.min_x) {
+        uint16_t surfindex = x+(y*donutsurfacemapsize.w)-donutoffset.x;
+        uint8_t xpos = un_heptet_x(surfindex);
+        uint8_t ypos = un_heptet_y(surfindex);
+        if (xpos > 0 && ypos < 127) {
+          memset(&info.data[x], texture_matrix[ypos][xpos], 1);
         }
       }
-      if (spec_white) {
-        GColor highlight = GColorIcterine;
-        fb_matrix[y+50][x+40] = highlight.argb;
-      }
     }
   }
   
+  // render shadows
   for(int y = 0; y < donutshadowsize.h; y++) {
-    for(int x = 0; x < donutshadowsize.w; x++) {
-      uint16_t shad_index = x+(y*donutshadowsize.w);
-      uint8_t shad_octet = donutshadow[shad_index/8];
-      bool shad_dark = 0;
-      if (fb_matrix[y+58][x+7] != bgcolor.argb && (x+y) % 2 == 0) {
-        shad_dark = 0;
-      } else {
-        switch (shad_index % 8) {
-          case 0:
-            shad_dark = 0b10000000 & shad_octet;
-            break;
-          case 1:
-            shad_dark = 0b01000000 & shad_octet;
-            break;
-          case 2:
-            shad_dark = 0b00100000 & shad_octet;
-            break;
-          case 3:
-            shad_dark = 0b00010000 & shad_octet;
-            break;
-          case 4:
-            shad_dark = 0b00001000 & shad_octet;
-            break;
-          case 5:
-            shad_dark = 0b00000100 & shad_octet;
-            break;
-          case 6:
-            shad_dark = 0b00000010 & shad_octet;
-            break;
-          case 7:
-            shad_dark = 0b00000001 & shad_octet;
-            break;
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y+shadowoffset.y);
+    for(int x = shadowoffset.x; x < donutshadowsize.w+shadowoffset.x; x++) {
+      if (x+shadowoffset.x < info.max_x && x+shadowoffset.x >= info.min_x) {
+        uint16_t shad_index = x+(y*donutshadowsize.w)-shadowoffset.x;
+        uint8_t shad_octet = donutshadow[shad_index/8];
+        bool shad_dark = 0;
+        if (info.data[x] != bgcolor.argb && (x+y) % 2 == 0) {
+          shad_dark = 0;
+        } else {
+          switch (shad_index % 8) {
+            case 0:
+              shad_dark = 0b10000000 & shad_octet;
+              break;
+            case 1:
+              shad_dark = 0b01000000 & shad_octet;
+              break;
+            case 2:
+              shad_dark = 0b00100000 & shad_octet;
+              break;
+            case 3:
+              shad_dark = 0b00010000 & shad_octet;
+              break;
+            case 4:
+              shad_dark = 0b00001000 & shad_octet;
+              break;
+            case 5:
+              shad_dark = 0b00000100 & shad_octet;
+              break;
+            case 6:
+              shad_dark = 0b00000010 & shad_octet;
+              break;
+            case 7:
+              shad_dark = 0b00000001 & shad_octet;
+              break;
+          }
         }
-      }
-      if (shad_dark) {
-        fb_matrix[y+58][x+7] = shadowtable[alpha & fb_matrix[y+58][x+8]];
+        if (shad_dark) {
+          memset(&info.data[x], shadowtable[alpha & info.data[x]], 1);
+        }
       }
     }
   }
   
+  // render highlights
+  for(int y = 0; y < donutspecularsize.h; y++) {
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y+specularoffset.y);
+    for(int x = specularoffset.x; x < donutspecularsize.w+specularoffset.x; x++) {
+      if (x+specularoffset.x < info.max_x && x+specularoffset.x >= info.min_x) {
+        uint16_t spec_index = x+(y*donutspecularsize.w)-specularoffset.x;
+        uint8_t spec_octet = donutspecular[spec_index/8];
+        bool spec_white = 0;
+        if ((x+y) % 2 == 0) {
+          spec_white = 0;
+        } else {
+          switch (spec_index % 8) {
+            case 0:
+              spec_white = 0b10000000 & spec_octet;
+              break;
+            case 1:
+              spec_white = 0b01000000 & spec_octet;
+              break;
+            case 2:
+              spec_white = 0b00100000 & spec_octet;
+              break;
+            case 3:
+              spec_white = 0b00010000 & spec_octet;
+              break;
+            case 4:
+              spec_white = 0b00001000 & spec_octet;
+              break;
+            case 5:
+              spec_white = 0b00000100 & spec_octet;
+              break;
+            case 6:
+              spec_white = 0b00000010 & spec_octet;
+              break;
+            case 7:
+              spec_white = 0b00000001 & spec_octet;
+              break;
+          }
+        }
+        if (spec_white) {
+          GColor highlight = GColorIcterine;
+          memset(&info.data[x], highlight.argb, 1);
+        }
+      }
+    }
+  }
+  
+  // release frame buffer and destroy texture
   graphics_release_frame_buffer(ctx, fb);
   gbitmap_destroy(texture);
 }
