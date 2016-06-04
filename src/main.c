@@ -3,28 +3,39 @@
 #include <shading.c>
 
 #define ANTIALIASING true
+#define WHWIDTH 18
 
-static uint8_t shadowtable[] = {
-  192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,
-  192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,
-  192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,
-  192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,192,
-  192,192,192,193,192,192,192,193,192,192,192,193,196,196,196,197,
-  192,192,192,193,192,192,192,193,192,192,192,193,196,196,196,197,
-  192,192,192,193,192,192,192,193,192,192,192,193,196,196,196,197,
-  208,208,208,209,208,208,208,209,208,208,208,209,212,212,212,213,
-  192,192,193,194,192,192,193,194,196,196,197,198,200,200,201,202,
-  192,192,193,194,192,192,193,194,196,196,197,198,200,200,201,202,
-  208,208,209,210,208,208,209,210,212,212,213,214,216,216,217,218,
-  224,224,225,226,224,224,225,226,228,228,229,230,232,232,233,234,
-  192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,
-  208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,
-  224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,
-  240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,
+/*
+static uint8_t bayer4x4[] = {
+   1, 9, 3,11,
+  13, 5,15, 7,
+   4,12, 2,10,
+  16, 8,14, 6,
+};
+*/
+
+static uint8_t bayer8x8[] = {
+   0,32, 8,40, 2,34,10,42,
+  48,16,56,24,50,18,58,26,
+  12,44, 4,36,14,46, 6,38,
+  60,28,52,20,62,30,54,22,
+   3,35,11,43, 1,33, 9,41,
+  51,19,59,27,49,17,57,25,
+  15,47, 7,39,13,45, 5,37,
+  63,31,55,23,61,29,53,21,
 };
 
-// alpha should only be 0b??111111 where ?? = 00 (full shade), 01 (much shade), 10 (some shade), 11 (none shade)
-static uint8_t alpha = 0b10111111;
+typedef union GColor32 {
+  uint32_t argb;
+  struct {
+    uint8_t b;
+    uint8_t g;
+    uint8_t r;
+    uint8_t a;
+  };
+} GColor32;
+
+uint8_t ditherfactor = 85;
 
 typedef struct {
   int hours;
@@ -36,7 +47,7 @@ static Layer *s_canvas_layer;
 
 static GPoint s_center;
 static Time s_last_time;
-static int whwidth = 18;
+
 static bool debug = false;
 
 /************************************ UI **************************************/
@@ -107,15 +118,15 @@ static void update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   graphics_context_set_stroke_color(ctx, GColorWindsorTan);
-  graphics_context_set_stroke_width(ctx, whwidth);
+  graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, s_center, minute_hand_outer);
   
   graphics_context_set_stroke_color(ctx, GColorBulgarianRose);
-  graphics_context_set_stroke_width(ctx, whwidth);
+  graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, s_center, hour_hand_outer);
   
   graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_circle(ctx, s_center, whwidth/4);
+  graphics_fill_circle(ctx, s_center, WHWIDTH/4);
   
   // define mapping metadata
   GSize mapdimensions = GSize(125, 80);
@@ -125,7 +136,6 @@ static void update_proc(Layer *layer, GContext *ctx) {
   GRect specularbounds = GRect(master_offset.x+31, master_offset.y+8, 74, 47);
   
   GColor bgcolor = GColorPurple;
-  GColor highlight = GColorIcterine;
   
   // capture frame buffer
   GBitmap *fb = graphics_capture_frame_buffer(ctx);
@@ -142,7 +152,6 @@ static void update_proc(Layer *layer, GContext *ctx) {
       if (x >= texturebounds.origin.x && y >= texturebounds.origin.y && x < texturebounds.origin.x+texturebounds.size.w && y < texturebounds.origin.y+texturebounds.size.h) {
         texture_matrix[y-texturebounds.origin.y][x-texturebounds.origin.x] = info.data[x];
       }
-      memset(&info.data[x], bgcolor.argb, 1);
     }
   }
   
@@ -150,17 +159,72 @@ static void update_proc(Layer *layer, GContext *ctx) {
   for(uint8_t y = 0; y < bounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
+      GColor fbpixel = GColorWhite;
       // render texture mapped object by looking up pixels in the lookup table
       if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
         uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
-        //uint8_t xpos = 16+un_heptet_x(surfindex);
         uint8_t xpos = 16+un_heptet(surfindex, donutsurfacemapred);
         uint8_t ypos = 127-un_heptet(surfindex, donutsurfacemapgreen);
         if (xpos > 0 && ypos < 127) {
-          memset(&info.data[x], texture_matrix[ypos][xpos], 1);
+          fbpixel.argb = texture_matrix[ypos][xpos];
         }
       }
+      
+      // transpose to 24 bit color
+      GColor32 newpixel;
+      newpixel.r = fbpixel.r*ditherfactor;
+      newpixel.g = fbpixel.g*ditherfactor;
+      newpixel.b = fbpixel.b*ditherfactor;
+      newpixel.a = 0xff;
+      
+      // render some test shading from the LUT to test dithering
+      if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
+        uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
+        uint8_t green = 2*(127-un_heptet(surfindex, donutsurfacemapgreen));
+        if (green < 254) {
+          if (newpixel.r - green > 0) {
+            newpixel.r -= green;
+          } else {
+            newpixel.r = 0;
+          }
+          if (newpixel.g - green > 0) {
+            newpixel.g -= green;
+          } else {
+            newpixel.g = 0;
+          }
+          if (newpixel.b - green > 0) {
+            newpixel.b -= green;
+          } else {
+            newpixel.b = 0;
+          }
+        }
+      }
+      if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
+        uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
+        uint8_t red = un_heptet(surfindex, donutsurfacemapred);
+        if (red > 0) {
+          if (red + newpixel.r < 255) {
+            newpixel.r += red;
+          } else {
+            newpixel.r = 255;
+          }
+          if (red + newpixel.g < 255) {
+            newpixel.g += red;
+          } else {
+            newpixel.g = 255;
+          }
+          if (red + newpixel.b < 255) {
+            newpixel.b += red;
+          } else {
+            newpixel.b = 255;
+          }
+        }
+      }
+      
+      // TODO remove test shading and add better shadows and highlights back in later from resources
+      
       // render shadows
+      /*
       if (x >= shadowbounds.origin.x && y >= shadowbounds.origin.y && x < shadowbounds.origin.x+shadowbounds.size.w && y < shadowbounds.origin.y+shadowbounds.size.h) {
         uint16_t shad_index = (x-shadowbounds.origin.x)+((y-shadowbounds.origin.y)*shadowbounds.size.w);
         uint8_t shad_octet = donutshadow[shad_index/8];
@@ -189,7 +253,16 @@ static void update_proc(Layer *layer, GContext *ctx) {
         if (spec_white) {
           memset(&info.data[x], highlight.argb, 1);
         }
-      }
+      }*/
+      
+      // here comes the actual dithering
+      uint8_t bayerpixel = bayer8x8[((x%8)+(y*8))%64];
+      fbpixel.r = (newpixel.r+bayerpixel)/ditherfactor;
+      fbpixel.g = (newpixel.g+bayerpixel)/ditherfactor;
+      fbpixel.b = (newpixel.b+bayerpixel)/ditherfactor;
+      fbpixel.a = 0b11;
+      
+      memset(&info.data[x], fbpixel.argb, 1);
     }
   }
   
@@ -256,5 +329,6 @@ int main() {
   app_event_loop();
   deinit();
 }
+
 
 
