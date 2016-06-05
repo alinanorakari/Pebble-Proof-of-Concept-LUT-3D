@@ -3,9 +3,9 @@
 #define ANTIALIASING true
 #define WHWIDTH 18
 #define DITHERFACTOR 85
-#define MAX_LINES_PER_CHUNK 100
-#define FRAME_DURATION 500
-#define ANGLE_INCREMENT 3
+#define MAX_LINES_PER_SLICE 100
+#define FRAME_DURATION 70
+#define ANGLE_INCREMENT 4
 
 static uint8_t bayer8x8[] = {
    0,32, 8,40, 2,34,10,42,
@@ -45,7 +45,7 @@ typedef struct {
 // global state
 static State g;
 
-static bool debug = true;
+static bool debug = false;
 
 /************************************ UI **************************************/
 
@@ -54,38 +54,38 @@ static void create_texture(State *state, Layer *layer, GContext *ctx) {
   state->texturebounds = GRect(state->center.x-64, state->center.y-64, 127, 127);
   GRect bounds_mo = grect_inset(state->texturebounds, GEdgeInsets(9));
   GRect bounds_ho = grect_inset(state->texturebounds, GEdgeInsets(23));
-  
+
   uint16_t minute_deg = state->animation_angle;
   uint16_t hour_deg = 360-minute_deg;
   GPoint minute_hand_outer = gpoint_from_polar(bounds_mo, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(minute_deg));
   GPoint hour_hand_outer = gpoint_from_polar(bounds_ho, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(hour_deg));
-  
+
   // draw the watch hands that will be used as texture
   graphics_context_set_antialiased(ctx, ANTIALIASING);
   graphics_context_set_fill_color(ctx, GColorShockingPink);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-  
+
   graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, state->center, minute_hand_outer);
-  
+
   graphics_context_set_stroke_color(ctx, GColorCeleste);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, state->center, hour_hand_outer);
-  
+
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, state->center, WHWIDTH/4);
-  
+
   state->bgcolor = GColorIcterine; // background color for behind the objects
-  
+
   // set up texture buffer
   state->texturesize = GSize(state->texturebounds.size.w, state->texturebounds.size.h);
   state->texture = gbitmap_create_blank(state->texturesize, GBitmapFormat8Bit);
   uint8_t (*texture_matrix)[state->texturesize.w] = (uint8_t (*)[state->texturesize.w]) gbitmap_get_data(state->texture);
-  
+
   // capture frame buffer
   GBitmap *tex_fb = graphics_capture_frame_buffer(ctx);
-  
+
   // capture texture before starting to modify the frame buffer
   for(uint8_t y = 0; y < bounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(tex_fb, y);
@@ -95,10 +95,10 @@ static void create_texture(State *state, Layer *layer, GContext *ctx) {
       }
     }
   }
-  
+
   // release frame buffer
   graphics_release_frame_buffer(ctx, tex_fb);
-  
+
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 }
@@ -111,9 +111,8 @@ static void destroy_texture(State *state) {
 static void render_slice(State *state, Layer *layer, GContext *ctx, GRect renderbounds) {
   GRect bounds = layer_get_bounds(layer);
   if (renderbounds.origin.y < bounds.origin.y) { renderbounds.origin.y = bounds.origin.y; }
-  if (renderbounds.size.h > MAX_LINES_PER_CHUNK) { renderbounds.size.h = MAX_LINES_PER_CHUNK; }
+  if (renderbounds.size.h > MAX_LINES_PER_SLICE) { renderbounds.size.h = MAX_LINES_PER_SLICE; }
   uint8_t (*texture_matrix)[state->texturesize.w] = (uint8_t (*)[state->texturesize.w]) gbitmap_get_data(state->texture);
-
   // START OF TEXTURE MAPPING
   // load map parts
   ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
@@ -138,6 +137,7 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
   // render texture mapped and shaded object
   for(uint8_t y = renderbounds.origin.y; y < renderbounds.origin.y+renderbounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
+    //APP_LOG(APP_LOG_LEVEL_DEBUG, "y %d x <= %d", y, info.max_x);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
       GColor fbpixel = state->bgcolor;
 
@@ -154,15 +154,26 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
 
         uint8_t xpos = lut_buffer[surfindex*2];
         uint8_t ypos = lut_buffer[(surfindex*2)+1];
+
+
+        //APP_LOG(APP_LOG_LEVEL_DEBUG, "x %d - y %d", xpos, ypos);
         if (xpos > 0 || ypos > 0) {
           uint8_t texturexpos = xpos/2;
           uint8_t textureypos = 127-(ypos/2);
+          if (textureypos > state->texturesize.h-1) {
+            textureypos = state->texturesize.h-1;
+          }
+          if (texturexpos > state->texturesize.w-1) {
+            texturexpos = state->texturesize.w-1;
+          }
+          //APP_LOG(APP_LOG_LEVEL_DEBUG, "texturex %d - texturey %d", texturexpos, textureypos);
           GColor texturepixel = (GColor8) texture_matrix[textureypos][texturexpos];
           newpixel.r = texturepixel.r*DITHERFACTOR;
           newpixel.g = texturepixel.g*DITHERFACTOR;
           newpixel.b = texturepixel.b*DITHERFACTOR;
+
           if (xpos%2 == 1 || ypos%2 == 1) {
-            // interpolate
+            // interpolation
             GColor texturepixel2;
             if (texturexpos < 255 && xpos%2 == 1) {
               texturepixel2.argb = texture_matrix[textureypos][texturexpos+1];
@@ -218,10 +229,8 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
 
 static void render_frame(State *state, Layer *layer, GContext *ctx) {
   create_texture(state, layer, ctx);
-  // TODO fix crash on real hardware when slice lines start or end outside some sort of unknown safe zone
-  render_slice(state, layer, ctx, GRect(0, 0, 144, 56));
-  render_slice(state, layer, ctx, GRect(0, 56, 144, 56));
-  render_slice(state, layer, ctx, GRect(0, 112, 144, 56));
+  render_slice(state, layer, ctx, GRect(0, 0, 144, 84));
+  render_slice(state, layer, ctx, GRect(0, 84, 144, 84));
   destroy_texture(state);
 }
 
@@ -250,16 +259,16 @@ static void init() {
   window_stack_push(g.window, true);
   Layer* window_layer = window_get_root_layer(g.window);
   GRect window_frame = layer_get_frame(window_layer);
-  
+
   g.layer = layer_create(window_frame);
   layer_set_update_proc(g.layer, &animation_layer_update);
   layer_add_child(window_layer, g.layer);
-  
+
   animation_init(&g);
-  
+
   g.timer_timeout = FRAME_DURATION;
   g.timer = app_timer_register(g.timer_timeout, &animation_update, &g);
-  
+
   if (debug) {
     light_enable(true);
   }
