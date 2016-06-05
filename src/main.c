@@ -1,18 +1,8 @@
 #include <pebble.h>
-#include <surfacemap.c>
-#include <shading.c>
 
 #define ANTIALIASING true
 #define WHWIDTH 18
-
-/*
-static uint8_t bayer4x4[] = {
-   1, 9, 3,11,
-  13, 5,15, 7,
-   4,12, 2,10,
-  16, 8,14, 6,
-};
-*/
+#define DITHERFACTOR 85
 
 static uint8_t bayer8x8[] = {
    0,32, 8,40, 2,34,10,42,
@@ -35,8 +25,6 @@ typedef union GColor32 {
   };
 } GColor32;
 
-uint8_t ditherfactor = 85;
-
 typedef struct {
   int hours;
   int minutes;
@@ -48,7 +36,7 @@ static Layer *s_canvas_layer;
 static GPoint s_center;
 static Time s_last_time;
 
-static bool debug = false;
+static bool debug = true;
 
 /************************************ UI **************************************/
 
@@ -80,26 +68,6 @@ static int32_t get_angle_for_hour(int hour, int minute) {
   return (((hour * 360) / 12)+(get_angle_for_minute(minute)/12));
 }
 
-static uint8_t un_heptet(uint16_t heptetindex, uint8_t *map) {
-  uint16_t heptoffset = heptetindex/8;
-  uint8_t heptet = map[heptetindex-heptoffset];
-  // actually don't even bother getting this right, it looks fine even without decoding the spread out heptet
-  /*if (heptetindex%8 == 6) {
-    heptet =
-      (map[heptetindex-heptoffset-6]&0b00000001)<<6 |
-      (map[heptetindex-heptoffset-5]&0b00000001)<<5 |
-      (map[heptetindex-heptoffset-4]&0b00000001)<<4 |
-      (map[heptetindex-heptoffset-3]&0b00000001)<<3 |
-      (map[heptetindex-heptoffset-2]&0b00000001)<<2 |
-      (map[heptetindex-heptoffset-1]&0b00000001)<<1 |
-      (map[heptetindex-heptoffset]&0b00000001);
-  } else {
-    heptet = heptet >> 1;
-  }*/
-  heptet = heptet >> 1;
-  return (heptet);
-}
-
 static void update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   GRect texturebounds = GRect(s_center.x-64, s_center.y-64, 127, 127);
@@ -114,28 +82,41 @@ static void update_proc(Layer *layer, GContext *ctx) {
   
   // draw the watch hands that will be used as texture
   graphics_context_set_antialiased(ctx, ANTIALIASING);
-  graphics_context_set_fill_color(ctx, GColorRajah);
+  graphics_context_set_fill_color(ctx, GColorShockingPink);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-
-  graphics_context_set_stroke_color(ctx, GColorWindsorTan);
+  
+  graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, s_center, minute_hand_outer);
   
-  graphics_context_set_stroke_color(ctx, GColorBulgarianRose);
+  graphics_context_set_stroke_color(ctx, GColorCeleste);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
   graphics_draw_line(ctx, s_center, hour_hand_outer);
   
-  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, s_center, WHWIDTH/4);
   
-  // define mapping metadata
-  GSize mapdimensions = GSize(125, 80);
-  GPoint master_offset = GPoint(s_center.x-(mapdimensions.w/2), s_center.y-(mapdimensions.h/2)+4);
-  GRect mapbounds = GRect(master_offset.x, master_offset.y, mapdimensions.w, mapdimensions.h);
-  GRect shadowbounds = GRect(master_offset.x-2, master_offset.y+16, 122, 71);
-  GRect specularbounds = GRect(master_offset.x+31, master_offset.y+8, 74, 47);
+  GColor bgcolor = GColorIcterine; // background color for behind the objects
   
-  GColor bgcolor = GColorPurple;
+  // load map parts
+  uint8_t map_numlines = 104; // max 168 (did 163)
+  
+  ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
+  size_t lut_res_size = 144*map_numlines*2;
+  uint8_t *lut_buffer = (uint8_t*)malloc(lut_res_size);
+  resource_load_byte_range(lut_handle, 0, lut_buffer, lut_res_size);
+  
+  ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING_TEST);
+  size_t shad_res_size = 144*map_numlines;
+  uint8_t *shad_buffer = (uint8_t*)malloc(shad_res_size);
+  resource_load_byte_range(shad_handle, 0, shad_buffer, shad_res_size);
+  
+  // define mapping metadata
+  //GSize mapdimensions = GSize(125, 80);
+  GSize mapdimensions = GSize(144, map_numlines);
+  //GPoint master_offset = GPoint(s_center.x-(mapdimensions.w/2), s_center.y-(mapdimensions.h/2)+4);
+  GPoint master_offset = GPoint(0, 0);
+  GRect mapbounds = GRect(master_offset.x, master_offset.y, mapdimensions.w, mapdimensions.h);
   
   // capture frame buffer
   GBitmap *fb = graphics_capture_frame_buffer(ctx);
@@ -145,7 +126,7 @@ static void update_proc(Layer *layer, GContext *ctx) {
   GBitmap *texture = gbitmap_create_blank(texturesize, GBitmapFormat8Bit);
   uint8_t (*texture_matrix)[texturesize.w] = (uint8_t (*)[texturesize.w]) gbitmap_get_data(texture);
   
-  // capture texture and fill frame buffer with new background color
+  // capture texture before starting to modify the frame buffer
   for(uint8_t y = 0; y < bounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
@@ -159,116 +140,105 @@ static void update_proc(Layer *layer, GContext *ctx) {
   for(uint8_t y = 0; y < bounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
-      GColor fbpixel = GColorWhite;
+      GColor fbpixel = bgcolor;
+      
+      // convert to 24 bit color
+      GColor32 newpixel;
+      newpixel.r = fbpixel.r*DITHERFACTOR;
+      newpixel.g = fbpixel.g*DITHERFACTOR;
+      newpixel.b = fbpixel.b*DITHERFACTOR;
+      newpixel.a = 0xff;
+      
       // render texture mapped object by looking up pixels in the lookup table
       if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
         uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
-        uint8_t xpos = 16+un_heptet(surfindex, donutsurfacemapred);
-        uint8_t ypos = 127-un_heptet(surfindex, donutsurfacemapgreen);
-        if (xpos > 0 && ypos < 127) {
-          fbpixel.argb = texture_matrix[ypos][xpos];
+        
+        uint8_t xpos = lut_buffer[surfindex*2];
+        uint8_t ypos = lut_buffer[(surfindex*2)+1];
+        if (xpos > 0 || ypos > 0) {
+          uint8_t texturexpos = xpos/2;
+          uint8_t textureypos = 127-(ypos/2);
+          GColor texturepixel;
+          texturepixel.argb = texture_matrix[textureypos][texturexpos];
+          newpixel.r = texturepixel.r*DITHERFACTOR;
+          newpixel.g = texturepixel.g*DITHERFACTOR;
+          newpixel.b = texturepixel.b*DITHERFACTOR;
+          if (xpos%2 == 1 || ypos%2 == 1) {
+            // interpolate
+            GColor texturepixel2;
+            if (texturexpos < 255 && xpos%2 == 1) {
+              texturepixel2.argb = texture_matrix[textureypos][texturexpos+1];
+              newpixel.r = (newpixel.r + texturepixel2.r*DITHERFACTOR)/2;
+              newpixel.g = (newpixel.g + texturepixel2.g*DITHERFACTOR)/2;
+              newpixel.b = (newpixel.b + texturepixel2.b*DITHERFACTOR)/2;
+            }
+            if (textureypos > 1 && ypos%2 == 1) {
+              texturepixel2.argb = texture_matrix[textureypos-1][texturexpos];
+              newpixel.r = (newpixel.r + texturepixel2.r*DITHERFACTOR)/2;
+              newpixel.g = (newpixel.g + texturepixel2.g*DITHERFACTOR)/2;
+              newpixel.b = (newpixel.b + texturepixel2.b*DITHERFACTOR)/2;
+            }
+            newpixel.r = (newpixel.r/DITHERFACTOR)*DITHERFACTOR;
+            newpixel.g = (newpixel.g/DITHERFACTOR)*DITHERFACTOR;
+            newpixel.b = (newpixel.b/DITHERFACTOR)*DITHERFACTOR;
+          }
         }
+        
+        uint8_t specularmap = shad_buffer[surfindex];
+        uint8_t shadowmap = specularmap & 0b00001111;
+        specularmap = (specularmap & 0b11110000) >> 4;
+        specularmap *= 16;
+        shadowmap *= 16;
+        
+        // subtract shadows
+        newpixel.r -= (newpixel.r > shadowmap) ? shadowmap : newpixel.r;
+        newpixel.g -= (newpixel.g > shadowmap) ? shadowmap : newpixel.g;
+        newpixel.b -= (newpixel.b > shadowmap) ? shadowmap : newpixel.b;
+        
+        // add highlights
+        newpixel.r += (255-newpixel.r > specularmap) ? specularmap : 255-newpixel.r;
+        newpixel.g += (255-newpixel.g > specularmap) ? specularmap : 255-newpixel.g;
+        newpixel.b += (255-newpixel.b > specularmap) ? specularmap : 255-newpixel.b;
       }
-      
-      // transpose to 24 bit color
-      GColor32 newpixel;
-      newpixel.r = fbpixel.r*ditherfactor;
-      newpixel.g = fbpixel.g*ditherfactor;
-      newpixel.b = fbpixel.b*ditherfactor;
-      newpixel.a = 0xff;
-      
-      // render some test shading from the LUT to test dithering
-      if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
-        uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
-        uint8_t green = 2*(127-un_heptet(surfindex, donutsurfacemapgreen));
-        if (green < 254) {
-          if (newpixel.r - green > 0) {
-            newpixel.r -= green;
-          } else {
-            newpixel.r = 0;
-          }
-          if (newpixel.g - green > 0) {
-            newpixel.g -= green;
-          } else {
-            newpixel.g = 0;
-          }
-          if (newpixel.b - green > 0) {
-            newpixel.b -= green;
-          } else {
-            newpixel.b = 0;
-          }
-        }
-      }
-      if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
-        uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
-        uint8_t red = un_heptet(surfindex, donutsurfacemapred);
-        if (red > 0) {
-          if (red + newpixel.r < 255) {
-            newpixel.r += red;
-          } else {
-            newpixel.r = 255;
-          }
-          if (red + newpixel.g < 255) {
-            newpixel.g += red;
-          } else {
-            newpixel.g = 255;
-          }
-          if (red + newpixel.b < 255) {
-            newpixel.b += red;
-          } else {
-            newpixel.b = 255;
-          }
-        }
-      }
-      
-      // TODO remove test shading and add better shadows and highlights back in later from resources
-      
-      // render shadows
-      /*
-      if (x >= shadowbounds.origin.x && y >= shadowbounds.origin.y && x < shadowbounds.origin.x+shadowbounds.size.w && y < shadowbounds.origin.y+shadowbounds.size.h) {
-        uint16_t shad_index = (x-shadowbounds.origin.x)+((y-shadowbounds.origin.y)*shadowbounds.size.w);
-        uint8_t shad_octet = donutshadow[shad_index/8];
-        bool shad_dark = 0;
-        if (info.data[x] != bgcolor.argb && (x+y) % 2 == 0) {
-          // keep shadowless, creating dithering effect
-        } else {
-          // fetch single bit out of bitfield
-          shad_dark = (0b10000000 >> shad_index%8) & shad_octet;
-        }
-        if (shad_dark) {
-          memset(&info.data[x], shadowtable[alpha & info.data[x]], 1);
-        }
-      }
-      // render specular highlights
-      if (x >= specularbounds.origin.x && y >= specularbounds.origin.y && x < specularbounds.origin.x+specularbounds.size.w && y < specularbounds.origin.y+specularbounds.size.h) {
-        uint16_t spec_index = (x-specularbounds.origin.x)+((y-specularbounds.origin.y)*specularbounds.size.w);
-        uint8_t spec_octet = donutspecular[spec_index/8];
-        bool spec_white = 0;
-        if ((x+y) % 2 == 0) {
-          // keep highlightless, creating dithering effect
-        } else {
-          // fetch single bit out of bitfield
-          spec_white = (0b10000000 >> spec_index%8) & spec_octet;
-        }
-        if (spec_white) {
-          memset(&info.data[x], highlight.argb, 1);
-        }
-      }*/
       
       // here comes the actual dithering
       uint8_t bayerpixel = bayer8x8[((x%8)+(y*8))%64];
-      fbpixel.r = (newpixel.r+bayerpixel)/ditherfactor;
-      fbpixel.g = (newpixel.g+bayerpixel)/ditherfactor;
-      fbpixel.b = (newpixel.b+bayerpixel)/ditherfactor;
+      fbpixel.r = (newpixel.r+bayerpixel)/DITHERFACTOR;
+      fbpixel.g = (newpixel.g+bayerpixel)/DITHERFACTOR;
+      fbpixel.b = (newpixel.b+bayerpixel)/DITHERFACTOR;
       fbpixel.a = 0b11;
       
       memset(&info.data[x], fbpixel.argb, 1);
     }
   }
   
-  // release frame buffer and destroy texture
-  graphics_release_frame_buffer(ctx, fb);
+  // free memory
+  free(lut_buffer);
+  free(shad_buffer);
   gbitmap_destroy(texture);
+  
+  // fx (chromatic aberrations)
+  for(uint8_t y = 0; y < bounds.size.h; y++) {
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
+    for(uint8_t x = info.min_x; x <= info.max_x; x++) {
+      GColor fbpixel, fbpixel1, fbpixel2;
+      fbpixel.argb = info.data[x];
+      fbpixel1.argb = info.data[x];
+      fbpixel2.argb = info.data[x];
+      if (x+1 <= info.max_x) {
+        fbpixel1.argb = info.data[x+1];
+        fbpixel.g = fbpixel1.g;
+      }
+      if (x+2 <= info.max_x) {
+        fbpixel2.argb = info.data[x+2];
+        fbpixel.b = fbpixel2.b;
+      }
+      memset(&info.data[x], fbpixel.argb, 1);
+    }
+  }
+  
+  // release frame buffer
+  graphics_release_frame_buffer(ctx, fb);
 }
 
 static void window_load(Window *window) {
@@ -329,6 +299,7 @@ int main() {
   app_event_loop();
   deinit();
 }
+
 
 
 

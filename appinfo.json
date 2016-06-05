@@ -1,32 +1,32 @@
 {
-    "appKeys": {
-        "btvibe": 8,
-        "colorbg": 0,
-        "colorh": 2,
-        "colorm": 1,
-        "colorp": 3,
-        "colort": 6,
-        "invert": 9,
-        "rectticks": 7,
-        "shadows": 4,
-        "ticks": 5,
-        "whwidth": 10
-    },
+    "appKeys": {},
     "capabilities": [
-        "configurable"
+        ""
     ],
     "companyName": "lastfuture",
     "enableMultiJS": false,
     "longName": "LUTface",
     "projectType": "native",
     "resources": {
-        "media": []
+        "media": [
+            {
+                "file": "data/shading",
+                "name": "SHADING_TEST",
+                "targetPlatforms": null,
+                "type": "raw"
+            },
+            {
+                "file": "data/testlut",
+                "name": "MAP_TEST",
+                "targetPlatforms": null,
+                "type": "raw"
+            }
+        ]
     },
     "sdkVersion": "3",
     "shortName": "LUTface",
     "targetPlatforms": [
-        "basalt",
-        "chalk"
+        "basalt"
     ],
     "uuid": "58059a20-c8c1-4a51-b99b-f0663e97ace8",
     "versionLabel": "0.1",
