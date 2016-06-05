@@ -3,6 +3,8 @@
 #define ANTIALIASING true
 #define WHWIDTH 18
 #define DITHERFACTOR 85
+#define LINES_PER_CHUNK 100
+#define FRAME_DURATION 35
 
 static uint8_t bayer8x8[] = {
    0,32, 8,40, 2,34,10,42,
@@ -26,57 +28,30 @@ typedef union GColor32 {
 } GColor32;
 
 typedef struct {
-  int hours;
-  int minutes;
-} Time;
+  GContext *ctx;
+	Window* window;
+	Layer* layer;
+  AppTimer *timer;
+  uint32_t timer_timeout;
+  uint16_t animation_angle;
+  GPoint center;
+} State;
 
-static Window *s_main_window;
-static Layer *s_canvas_layer;
-
-static GPoint s_center;
-static Time s_last_time;
+// global state
+static State g;
 
 static bool debug = true;
 
 /************************************ UI **************************************/
 
-static void tick_handler(struct tm *tick_time, TimeUnits changed) {
-  // Store time
-  // dummy time in emulator
-  if (debug) {
-    s_last_time.hours = 0;
-    s_last_time.minutes = tick_time->tm_sec;
-  } else {
-    s_last_time.hours = tick_time->tm_hour;
-    s_last_time.hours -= (s_last_time.hours > 12) ? 12 : 0;
-    s_last_time.minutes = tick_time->tm_min;
-  }
-
-  // Redraw
-  if(s_canvas_layer) {
-    layer_mark_dirty(s_canvas_layer);
-  }
-}
-
-static int32_t get_angle_for_minute(int minute) {
-  // Progress through 60 minutes, out of 360 degrees
-  return ((minute * 360) / 60);
-}
-
-static int32_t get_angle_for_hour(int hour, int minute) {
-  // Progress through 12 hours, out of 360 degrees
-  return (((hour * 360) / 12)+(get_angle_for_minute(minute)/12));
-}
-
-static void update_proc(Layer *layer, GContext *ctx) {
+static void render_part(State *state, Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  GRect texturebounds = GRect(s_center.x-64, s_center.y-64, 127, 127);
+  GRect texturebounds = GRect(state->center.x-64, state->center.y-64, 127, 127);
   GRect bounds_mo = grect_inset(texturebounds, GEdgeInsets(9));
   GRect bounds_ho = grect_inset(texturebounds, GEdgeInsets(23));
-
-  // Adjust for minutes through the hour
-  int32_t hour_deg = get_angle_for_hour(s_last_time.hours, s_last_time.minutes);
-  int32_t minute_deg = get_angle_for_minute(s_last_time.minutes);
+  
+  uint16_t minute_deg = state->animation_angle;
+  uint16_t hour_deg = 360-minute_deg;
   GPoint minute_hand_outer = gpoint_from_polar(bounds_mo, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(minute_deg));
   GPoint hour_hand_outer = gpoint_from_polar(bounds_ho, GOvalScaleModeFillCircle, DEG_TO_TRIGANGLE(hour_deg));
   
@@ -87,34 +62,32 @@ static void update_proc(Layer *layer, GContext *ctx) {
   
   graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
-  graphics_draw_line(ctx, s_center, minute_hand_outer);
+  graphics_draw_line(ctx, state->center, minute_hand_outer);
   
   graphics_context_set_stroke_color(ctx, GColorCeleste);
   graphics_context_set_stroke_width(ctx, WHWIDTH);
-  graphics_draw_line(ctx, s_center, hour_hand_outer);
+  graphics_draw_line(ctx, state->center, hour_hand_outer);
   
   graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_circle(ctx, s_center, WHWIDTH/4);
+  graphics_fill_circle(ctx, state->center, WHWIDTH/4);
   
+  // START OF TEXTURE MAPPING
   GColor bgcolor = GColorIcterine; // background color for behind the objects
   
   // load map parts
-  uint8_t map_numlines = 104; // max 168 (did 163)
-  
   ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
-  size_t lut_res_size = 144*map_numlines*2;
+  size_t lut_res_size = 144*LINES_PER_CHUNK*2;
   uint8_t *lut_buffer = (uint8_t*)malloc(lut_res_size);
   resource_load_byte_range(lut_handle, 0, lut_buffer, lut_res_size);
   
   ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING_TEST);
-  size_t shad_res_size = 144*map_numlines;
+  size_t shad_res_size = 144*LINES_PER_CHUNK;
   uint8_t *shad_buffer = (uint8_t*)malloc(shad_res_size);
   resource_load_byte_range(shad_handle, 0, shad_buffer, shad_res_size);
   
   // define mapping metadata
-  //GSize mapdimensions = GSize(125, 80);
-  GSize mapdimensions = GSize(144, map_numlines);
-  //GPoint master_offset = GPoint(s_center.x-(mapdimensions.w/2), s_center.y-(mapdimensions.h/2)+4);
+  GSize mapdimensions = GSize(144, LINES_PER_CHUNK);
+  //GPoint master_offset = GPoint(state->center.x-(mapdimensions.w/2), state->center.y-(mapdimensions.h/2)+4);
   GPoint master_offset = GPoint(0, 0);
   GRect mapbounds = GRect(master_offset.x, master_offset.y, mapdimensions.w, mapdimensions.h);
   
@@ -158,8 +131,7 @@ static void update_proc(Layer *layer, GContext *ctx) {
         if (xpos > 0 || ypos > 0) {
           uint8_t texturexpos = xpos/2;
           uint8_t textureypos = 127-(ypos/2);
-          GColor texturepixel;
-          texturepixel.argb = texture_matrix[textureypos][texturexpos];
+          GColor texturepixel = (GColor8) texture_matrix[textureypos][texturexpos];
           newpixel.r = texturepixel.r*DITHERFACTOR;
           newpixel.g = texturepixel.g*DITHERFACTOR;
           newpixel.b = texturepixel.b*DITHERFACTOR;
@@ -185,10 +157,8 @@ static void update_proc(Layer *layer, GContext *ctx) {
         }
         
         uint8_t specularmap = shad_buffer[surfindex];
-        uint8_t shadowmap = specularmap & 0b00001111;
-        specularmap = (specularmap & 0b11110000) >> 4;
-        specularmap *= 16;
-        shadowmap *= 16;
+        uint8_t shadowmap = (specularmap & 0b00001111)*16;
+        specularmap = ((specularmap & 0b11110000) >> 4)*16;
         
         // subtract shadows
         newpixel.r -= (newpixel.r > shadowmap) ? shadowmap : newpixel.r;
@@ -217,81 +187,54 @@ static void update_proc(Layer *layer, GContext *ctx) {
   free(shad_buffer);
   gbitmap_destroy(texture);
   
-  // fx (chromatic aberrations)
-  for(uint8_t y = 0; y < bounds.size.h; y++) {
-    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
-    for(uint8_t x = info.min_x; x <= info.max_x; x++) {
-      GColor fbpixel, fbpixel1, fbpixel2;
-      fbpixel.argb = info.data[x];
-      fbpixel1.argb = info.data[x];
-      fbpixel2.argb = info.data[x];
-      if (x+1 <= info.max_x) {
-        fbpixel1.argb = info.data[x+1];
-        fbpixel.g = fbpixel1.g;
-      }
-      if (x+2 <= info.max_x) {
-        fbpixel2.argb = info.data[x+2];
-        fbpixel.b = fbpixel2.b;
-      }
-      memset(&info.data[x], fbpixel.argb, 1);
-    }
-  }
-  
   // release frame buffer
   graphics_release_frame_buffer(ctx, fb);
 }
 
-static void window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect window_bounds = layer_get_bounds(window_layer);
-
-  s_center = grect_center_point(&window_bounds);
-  s_center.x -= 1;
-  s_center.y -= 1;
-
-  s_canvas_layer = layer_create(window_bounds);
-  layer_set_update_proc(s_canvas_layer, update_proc);
-  layer_add_child(window_layer, s_canvas_layer);
-}
-
-static void window_unload(Window *window) {
-  layer_destroy(s_canvas_layer);
-}
-
 /*********************************** App **************************************/
 
+void animation_init(State* state) {
+  state->animation_angle = 0;
+  GRect window_bounds = layer_get_bounds(state->layer);
+  state->center = grect_center_point(&window_bounds);
+  state->center.x -= 1;
+  state->center.y -= 1;
+}
+static void animation_layer_update(Layer *layer, GContext *ctx) {
+  render_part(&g, layer, ctx);
+}
+
+void animation_update(void* data) {
+  State* state = (State*)data;
+	state->animation_angle += (state->animation_angle < 360) ? 1 : 0-state->animation_angle;
+  layer_mark_dirty(state->layer);
+  state->timer = app_timer_register(state->timer_timeout, &animation_update, data);
+}
+
 static void init() {
-  srand(time(NULL));
-
-  time_t t = time(NULL);
-  struct tm *time_now = localtime(&t);
-  if (debug) {
-    tick_handler(time_now, SECOND_UNIT);
-  } else {
-    tick_handler(time_now, MINUTE_UNIT);
-  }
-
-  s_main_window = window_create();
-  window_set_window_handlers(s_main_window, (WindowHandlers) {
-    .load = window_load,
-    .unload = window_unload,
-  });
-  window_stack_push(s_main_window, true);
-
-  if (debug) {
-    tick_timer_service_subscribe(SECOND_UNIT, tick_handler);
-  } else {
-    tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-  }
+  g.window = window_create();
+  window_stack_push(g.window, true);
+  Layer* window_layer = window_get_root_layer(g.window);
+  GRect window_frame = layer_get_frame(window_layer);
+  
+  g.layer = layer_create(window_frame);
+  layer_set_update_proc(g.layer, &animation_layer_update);
+  layer_add_child(window_layer, g.layer);
+  
+  animation_init(&g);
+  
+  g.timer_timeout = FRAME_DURATION;
+  g.timer = app_timer_register(g.timer_timeout, &animation_update, &g);
   
   if (debug) {
     light_enable(true);
   }
-
 }
 
 static void deinit() {
-  window_destroy(s_main_window);
+  app_timer_cancel(g.timer);
+  window_destroy(g.window);
+  layer_destroy(g.layer);
 }
 
 int main() {
