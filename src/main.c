@@ -3,8 +3,9 @@
 #define ANTIALIASING true
 #define WHWIDTH 18
 #define DITHERFACTOR 85
-#define LINES_PER_CHUNK 100
-#define FRAME_DURATION 35
+#define MAX_LINES_PER_CHUNK 100
+#define FRAME_DURATION 500
+#define ANGLE_INCREMENT 3
 
 static uint8_t bayer8x8[] = {
    0,32, 8,40, 2,34,10,42,
@@ -35,6 +36,10 @@ typedef struct {
   uint32_t timer_timeout;
   uint16_t animation_angle;
   GPoint center;
+  GRect texturebounds;
+  GBitmap *texture;
+  GSize texturesize;
+  GColor bgcolor;
 } State;
 
 // global state
@@ -44,11 +49,11 @@ static bool debug = true;
 
 /************************************ UI **************************************/
 
-static void render_part(State *state, Layer *layer, GContext *ctx) {
+static void create_texture(State *state, Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  GRect texturebounds = GRect(state->center.x-64, state->center.y-64, 127, 127);
-  GRect bounds_mo = grect_inset(texturebounds, GEdgeInsets(9));
-  GRect bounds_ho = grect_inset(texturebounds, GEdgeInsets(23));
+  state->texturebounds = GRect(state->center.x-64, state->center.y-64, 127, 127);
+  GRect bounds_mo = grect_inset(state->texturebounds, GEdgeInsets(9));
+  GRect bounds_ho = grect_inset(state->texturebounds, GEdgeInsets(23));
   
   uint16_t minute_deg = state->animation_angle;
   uint16_t hour_deg = 360-minute_deg;
@@ -71,61 +76,82 @@ static void render_part(State *state, Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, state->center, WHWIDTH/4);
   
-  // START OF TEXTURE MAPPING
-  GColor bgcolor = GColorIcterine; // background color for behind the objects
-  
-  // load map parts
-  ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
-  size_t lut_res_size = 144*LINES_PER_CHUNK*2;
-  uint8_t *lut_buffer = (uint8_t*)malloc(lut_res_size);
-  resource_load_byte_range(lut_handle, 0, lut_buffer, lut_res_size);
-  
-  ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING_TEST);
-  size_t shad_res_size = 144*LINES_PER_CHUNK;
-  uint8_t *shad_buffer = (uint8_t*)malloc(shad_res_size);
-  resource_load_byte_range(shad_handle, 0, shad_buffer, shad_res_size);
-  
-  // define mapping metadata
-  GSize mapdimensions = GSize(144, LINES_PER_CHUNK);
-  //GPoint master_offset = GPoint(state->center.x-(mapdimensions.w/2), state->center.y-(mapdimensions.h/2)+4);
-  GPoint master_offset = GPoint(0, 0);
-  GRect mapbounds = GRect(master_offset.x, master_offset.y, mapdimensions.w, mapdimensions.h);
-  
-  // capture frame buffer
-  GBitmap *fb = graphics_capture_frame_buffer(ctx);
+  state->bgcolor = GColorIcterine; // background color for behind the objects
   
   // set up texture buffer
-  GSize texturesize = GSize(texturebounds.size.w, texturebounds.size.h);
-  GBitmap *texture = gbitmap_create_blank(texturesize, GBitmapFormat8Bit);
-  uint8_t (*texture_matrix)[texturesize.w] = (uint8_t (*)[texturesize.w]) gbitmap_get_data(texture);
+  state->texturesize = GSize(state->texturebounds.size.w, state->texturebounds.size.h);
+  state->texture = gbitmap_create_blank(state->texturesize, GBitmapFormat8Bit);
+  uint8_t (*texture_matrix)[state->texturesize.w] = (uint8_t (*)[state->texturesize.w]) gbitmap_get_data(state->texture);
+  
+  // capture frame buffer
+  GBitmap *tex_fb = graphics_capture_frame_buffer(ctx);
   
   // capture texture before starting to modify the frame buffer
   for(uint8_t y = 0; y < bounds.size.h; y++) {
-    GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
+    GBitmapDataRowInfo info = gbitmap_get_data_row_info(tex_fb, y);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
-      if (x >= texturebounds.origin.x && y >= texturebounds.origin.y && x < texturebounds.origin.x+texturebounds.size.w && y < texturebounds.origin.y+texturebounds.size.h) {
-        texture_matrix[y-texturebounds.origin.y][x-texturebounds.origin.x] = info.data[x];
+      if (x >= state->texturebounds.origin.x && y >= state->texturebounds.origin.y && x < state->texturebounds.origin.x+state->texturebounds.size.w && y < state->texturebounds.origin.y+state->texturebounds.size.h) {
+        texture_matrix[y-state->texturebounds.origin.y][x-state->texturebounds.origin.x] = info.data[x];
       }
     }
   }
   
+  // release frame buffer
+  graphics_release_frame_buffer(ctx, tex_fb);
+  
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+}
+
+static void destroy_texture(State *state) {
+  // free memory
+  gbitmap_destroy(state->texture);
+}
+
+static void render_slice(State *state, Layer *layer, GContext *ctx, GRect renderbounds) {
+  GRect bounds = layer_get_bounds(layer);
+  if (renderbounds.origin.y < bounds.origin.y) { renderbounds.origin.y = bounds.origin.y; }
+  if (renderbounds.size.h > MAX_LINES_PER_CHUNK) { renderbounds.size.h = MAX_LINES_PER_CHUNK; }
+  uint8_t (*texture_matrix)[state->texturesize.w] = (uint8_t (*)[state->texturesize.w]) gbitmap_get_data(state->texture);
+
+  // START OF TEXTURE MAPPING
+  // load map parts
+  ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
+  size_t lut_res_size = bounds.size.w*renderbounds.size.h*2;
+  uint8_t *lut_buffer = (uint8_t*)malloc(lut_res_size);
+  resource_load_byte_range(lut_handle, renderbounds.origin.y*bounds.size.w*2, lut_buffer, lut_res_size);
+
+  ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING_TEST);
+  size_t shad_res_size = 144*renderbounds.size.h;
+  uint8_t *shad_buffer = (uint8_t*)malloc(shad_res_size);
+  resource_load_byte_range(shad_handle, renderbounds.origin.y*bounds.size.w, shad_buffer, shad_res_size);
+
+  // define mapping metadata
+  GSize mapdimensions = GSize(bounds.size.w, renderbounds.size.h);
+  //GPoint master_offset = GPoint(state->center.x-(mapdimensions.w/2), state->center.y-(mapdimensions.h/2)+4);
+  GPoint master_offset = GPoint(bounds.origin.x, renderbounds.origin.y);
+  GRect mapbounds = GRect(master_offset.x, master_offset.y, mapdimensions.w, mapdimensions.h);
+
+  // capture frame buffer
+  GBitmap *fb = graphics_capture_frame_buffer(ctx);
+
   // render texture mapped and shaded object
-  for(uint8_t y = 0; y < bounds.size.h; y++) {
+  for(uint8_t y = renderbounds.origin.y; y < renderbounds.origin.y+renderbounds.size.h; y++) {
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
-      GColor fbpixel = bgcolor;
-      
+      GColor fbpixel = state->bgcolor;
+
       // convert to 24 bit color
       GColor32 newpixel;
       newpixel.r = fbpixel.r*DITHERFACTOR;
       newpixel.g = fbpixel.g*DITHERFACTOR;
       newpixel.b = fbpixel.b*DITHERFACTOR;
       newpixel.a = 0xff;
-      
+
       // render texture mapped object by looking up pixels in the lookup table
       if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
         uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
-        
+
         uint8_t xpos = lut_buffer[surfindex*2];
         uint8_t ypos = lut_buffer[(surfindex*2)+1];
         if (xpos > 0 || ypos > 0) {
@@ -155,40 +181,48 @@ static void render_part(State *state, Layer *layer, GContext *ctx) {
             newpixel.b = (newpixel.b/DITHERFACTOR)*DITHERFACTOR;
           }
         }
-        
+
         uint8_t specularmap = shad_buffer[surfindex];
         uint8_t shadowmap = (specularmap & 0b00001111)*16;
         specularmap = ((specularmap & 0b11110000) >> 4)*16;
-        
+
         // subtract shadows
         newpixel.r -= (newpixel.r > shadowmap) ? shadowmap : newpixel.r;
         newpixel.g -= (newpixel.g > shadowmap) ? shadowmap : newpixel.g;
         newpixel.b -= (newpixel.b > shadowmap) ? shadowmap : newpixel.b;
-        
+
         // add highlights
         newpixel.r += (255-newpixel.r > specularmap) ? specularmap : 255-newpixel.r;
         newpixel.g += (255-newpixel.g > specularmap) ? specularmap : 255-newpixel.g;
         newpixel.b += (255-newpixel.b > specularmap) ? specularmap : 255-newpixel.b;
       }
-      
+
       // here comes the actual dithering
       uint8_t bayerpixel = bayer8x8[((x%8)+(y*8))%64];
       fbpixel.r = (newpixel.r+bayerpixel)/DITHERFACTOR;
       fbpixel.g = (newpixel.g+bayerpixel)/DITHERFACTOR;
       fbpixel.b = (newpixel.b+bayerpixel)/DITHERFACTOR;
       fbpixel.a = 0b11;
-      
+
       memset(&info.data[x], fbpixel.argb, 1);
     }
   }
-  
+
   // free memory
   free(lut_buffer);
   free(shad_buffer);
-  gbitmap_destroy(texture);
-  
+
   // release frame buffer
   graphics_release_frame_buffer(ctx, fb);
+}
+
+static void render_frame(State *state, Layer *layer, GContext *ctx) {
+  create_texture(state, layer, ctx);
+  // TODO fix crash on real hardware when slice lines start or end outside some sort of unknown safe zone
+  render_slice(state, layer, ctx, GRect(0, 0, 144, 56));
+  render_slice(state, layer, ctx, GRect(0, 56, 144, 56));
+  render_slice(state, layer, ctx, GRect(0, 112, 144, 56));
+  destroy_texture(state);
 }
 
 /*********************************** App **************************************/
@@ -201,12 +235,12 @@ void animation_init(State* state) {
   state->center.y -= 1;
 }
 static void animation_layer_update(Layer *layer, GContext *ctx) {
-  render_part(&g, layer, ctx);
+  render_frame(&g, layer, ctx);
 }
 
 void animation_update(void* data) {
   State* state = (State*)data;
-	state->animation_angle += (state->animation_angle < 360) ? 1 : 0-state->animation_angle;
+	state->animation_angle += (state->animation_angle < 360) ? ANGLE_INCREMENT : 0-state->animation_angle;
   layer_mark_dirty(state->layer);
   state->timer = app_timer_register(state->timer_timeout, &animation_update, data);
 }
@@ -242,7 +276,3 @@ int main() {
   app_event_loop();
   deinit();
 }
-
-
-
-
