@@ -45,7 +45,7 @@ typedef struct {
 // global state
 static State g;
 
-static bool debug = false;
+static bool debug = true;
 
 /************************************ UI **************************************/
 
@@ -76,7 +76,7 @@ static void create_texture(State *state, Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, state->center, WHWIDTH/4);
 
-  state->bgcolor = GColorIcterine; // background color for behind the objects
+  state->bgcolor = GColorShockingPink; // background color for behind the objects
 
   // set up texture buffer
   state->texturesize = GSize(state->texturebounds.size.w, state->texturebounds.size.h);
@@ -99,8 +99,8 @@ static void create_texture(State *state, Layer *layer, GContext *ctx) {
   // release frame buffer
   graphics_release_frame_buffer(ctx, tex_fb);
 
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  /*graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);*/
 }
 
 static void destroy_texture(State *state) {
@@ -115,12 +115,12 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
   uint8_t (*texture_matrix)[state->texturesize.w] = (uint8_t (*)[state->texturesize.w]) gbitmap_get_data(state->texture);
   // START OF TEXTURE MAPPING
   // load map parts
-  ResHandle lut_handle = resource_get_handle(RESOURCE_ID_MAP_TEST);
+  ResHandle lut_handle = resource_get_handle(RESOURCE_ID_LUT);
   size_t lut_res_size = bounds.size.w*renderbounds.size.h*2;
   uint8_t *lut_buffer = (uint8_t*)malloc(lut_res_size);
   resource_load_byte_range(lut_handle, renderbounds.origin.y*bounds.size.w*2, lut_buffer, lut_res_size);
 
-  ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING_TEST);
+  ResHandle shad_handle = resource_get_handle(RESOURCE_ID_SHADING);
   size_t shad_res_size = 144*renderbounds.size.h;
   uint8_t *shad_buffer = (uint8_t*)malloc(shad_res_size);
   resource_load_byte_range(shad_handle, renderbounds.origin.y*bounds.size.w, shad_buffer, shad_res_size);
@@ -139,7 +139,8 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
     GBitmapDataRowInfo info = gbitmap_get_data_row_info(fb, y);
     //APP_LOG(APP_LOG_LEVEL_DEBUG, "y %d x <= %d", y, info.max_x);
     for(uint8_t x = info.min_x; x <= info.max_x; x++) {
-      GColor fbpixel = state->bgcolor;
+      GColor fbpixel;
+      fbpixel.argb = info.data[x];
 
       // convert to 24 bit color
       GColor32 newpixel;
@@ -149,12 +150,12 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
       newpixel.a = 0xff;
 
       // render texture mapped object by looking up pixels in the lookup table
+
       if (x >= mapbounds.origin.x && y >= mapbounds.origin.y && x < mapbounds.origin.x+mapbounds.size.w && y < mapbounds.origin.y+mapbounds.size.h) {
         uint16_t surfindex = (x-mapbounds.origin.x)+((y-mapbounds.origin.y)*mapbounds.size.w);
 
         uint8_t xpos = lut_buffer[surfindex*2];
         uint8_t ypos = lut_buffer[(surfindex*2)+1];
-
 
         //APP_LOG(APP_LOG_LEVEL_DEBUG, "x %d - y %d", xpos, ypos);
         if (xpos > 0 || ypos > 0) {
@@ -192,7 +193,6 @@ static void render_slice(State *state, Layer *layer, GContext *ctx, GRect render
             newpixel.b = (newpixel.b/DITHERFACTOR)*DITHERFACTOR;
           }
         }
-
         uint8_t specularmap = shad_buffer[surfindex];
         uint8_t shadowmap = (specularmap & 0b00001111)*16;
         specularmap = ((specularmap & 0b11110000) >> 4)*16;

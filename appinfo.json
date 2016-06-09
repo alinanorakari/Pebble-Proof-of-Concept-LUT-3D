@@ -10,14 +10,14 @@
     "resources": {
         "media": [
             {
-                "file": "data/shading",
-                "name": "SHADING_TEST",
+                "file": "data/shading.bin",
+                "name": "SHADING",
                 "targetPlatforms": null,
                 "type": "raw"
             },
             {
-                "file": "data/testlut",
-                "name": "MAP_TEST",
+                "file": "data/lut.bin",
+                "name": "LUT",
                 "targetPlatforms": null,
                 "type": "raw"
             }
@@ -31,6 +31,6 @@
     "uuid": "58059a20-c8c1-4a51-b99b-f0663e97ace8",
     "versionLabel": "0.1",
     "watchapp": {
-        "watchface": true
+        "watchface": false
     }
 }

@@ -1,4 +1,5 @@
 #pebble
+/resources/data
 /build
 .lock-waf_darwin_build
 
